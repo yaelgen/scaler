@@ -6,6 +6,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/v3io/scaler/pkg/common"
@@ -25,6 +26,7 @@ type Handler struct {
 	targetPathHeader   string
 	targetPort         int
 	targetURLCache     *cache.LRUExpireCache
+	proxyMutex         sync.Mutex
 	lastProxyErrorTime time.Time
 }
 
@@ -42,6 +44,7 @@ func NewHandler(parentLogger logger.Logger,
 		targetPathHeader:   targetPathHeader,
 		targetPort:         targetPort,
 		targetURLCache:     cache.NewLRUExpireCache(100),
+		proxyMutex:         sync.Mutex{},
 		lastProxyErrorTime: time.Now(),
 	}
 	h.HandleFunc = h.handleRequest
@@ -99,10 +102,17 @@ func (h *Handler) handleRequest(res http.ResponseWriter, req *http.Request) {
 
 	targetURL := h.selectTargetURL(resourceNames, resourceTargetURLMap)
 
+	h.proxyMutex.Lock()
+	targetURLCacheKey := targetURL.String()
+
 	//if in cache, do not log
-	if _, found := h.targetURLCache.Get("targetURLCache"); !found {
+	if _, found := h.targetURLCache.Get(targetURLCacheKey); !found {
 		h.logger.DebugWith("Creating reverse proxy", "targetURLCache", targetURL)
+
+		// store in cache
+		h.targetURLCache.Add(targetURLCacheKey, true, 5*time.Second)
 	}
+	h.proxyMutex.Unlock()
 
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
@@ -116,8 +126,6 @@ func (h *Handler) handleRequest(res http.ResponseWriter, req *http.Request) {
 		rw.WriteHeader(http.StatusBadGateway)
 	}
 
-	// store in cache
-	h.targetURLCache.Add("targetURLCache", true, time.Second)
 	proxy.ServeHTTP(res, req)
 }
 
